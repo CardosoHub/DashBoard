@@ -35,7 +35,7 @@ st.sidebar.write("### Novo Cadastro")
 Ano = st.sidebar.number_input("Digite o ano", min_value=2000, max_value=2100, step=1, value=2026)
 Mes = st.sidebar.selectbox("Selecione o mês", ORDEM_MESES)
 Consultor = st.sidebar.selectbox("Selecione o consultor", ["Loja", "Angela", "Camila", "Juliana"])
-Percentual = st.sidebar.number_input("Digite o percentual", min_value=0.0, max_value=200.0, value=0.0, step=0.01, format="%.2f")
+Percentual = st.sidebar.number_input("Digite o percentual", min_value=0.0, max_value=400.0, value=0.0, step=0.01, format="%.2f")
 
 botao_cadastra = st.sidebar.button("Cadastrar Multi")
 
