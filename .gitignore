@@ -1,0 +1,11 @@
+# Banco de dados local: nao versionar dados de usuarios
+multi_analytics.db
+multi_analytics.db-shm
+multi_analytics.db-wal
+
+# Segredos e ambiente local
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
