@@ -126,6 +126,80 @@ if not st.session_state.dados.empty:
         st.info(f"Não há dados de consultores para {mes_ranking} de {ano_ranking}.")
 
 
+    # =========================================================================
+    # ACOMPANHAMENTO EXCLUSIVO DA LOJA
+    # =========================================================================
+    st.write("---")
+    st.write("## 🏬 Acompanhamento da Loja")
+    st.caption("Cadastre o percentual da Loja no formulário lateral e acompanhe o resultado por mês e por ano.")
+
+    df_loja_acomp = df_temp[
+        df_temp["Consultor"].astype(str).str.strip().str.casefold() == "loja"
+    ].copy()
+    df_loja_acomp["Mês"] = df_loja_acomp["Mês"].astype(str).str.strip()
+
+    if not df_loja_acomp.empty:
+        anos_loja = sorted(df_loja_acomp["Ano"].dropna().unique().tolist(), reverse=True)
+        ano_loja = st.selectbox("Ano para acompanhar a Loja", anos_loja, key="ano_acomp_loja")
+        df_loja_ano = df_loja_acomp[df_loja_acomp["Ano"] == int(ano_loja)].copy()
+        meses_loja = [m for m in ORDEM_MESES if m in df_loja_ano["Mês"].unique()]
+
+        if meses_loja:
+            mes_loja = st.selectbox("Mês para acompanhar a Loja", meses_loja, key="mes_acomp_loja")
+            df_loja_mes = df_loja_ano[df_loja_ano["Mês"] == mes_loja]
+            percentual_mes_loja = float(df_loja_mes["Percentual"].mean())
+            media_ano_loja = float(df_loja_ano["Percentual"].mean())
+            variacao = percentual_mes_loja - media_ano_loja
+
+            if percentual_mes_loja < 70:
+                status_loja = "🔴 Abaixo de 70%"
+            elif percentual_mes_loja < 100:
+                status_loja = "🟡 Entre 70% e 99,99%"
+            else:
+                status_loja = "🟢 Meta atingida (100% ou mais)"
+
+            col_loja_1, col_loja_2, col_loja_3 = st.columns(3)
+            col_loja_1.metric(f"Loja — {mes_loja}/{ano_loja}", f"{percentual_mes_loja:.2f}%", delta=f"{variacao:+.2f} p.p. vs. média anual")
+            col_loja_2.metric(f"Média anual — {ano_loja}", f"{media_ano_loja:.2f}%")
+            col_loja_3.metric("Status do período", status_loja)
+
+            # Consolida possíveis cadastros duplicados em uma média por mês.
+            evolucao_loja = (
+                df_loja_ano.groupby("Mês", as_index=False)["Percentual"]
+                .mean()
+            )
+            evolucao_loja["Mês"] = pd.Categorical(
+                evolucao_loja["Mês"], categories=ORDEM_MESES, ordered=True
+            )
+            evolucao_loja = evolucao_loja.sort_values("Mês")
+            evolucao_loja["Status"] = evolucao_loja["Percentual"].apply(
+                lambda valor: "Abaixo de 70%" if valor < 70
+                else ("70% a 99,99%" if valor < 100 else "100% ou mais")
+            )
+
+            grafico_loja = px.bar(
+                evolucao_loja,
+                x="Mês",
+                y="Percentual",
+                color="Status",
+                text=evolucao_loja["Percentual"].map(lambda valor: f"{valor:.2f}%"),
+                category_orders={"Mês": ORDEM_MESES},
+                color_discrete_map={
+                    "Abaixo de 70%": "red",
+                    "70% a 99,99%": "yellow",
+                    "100% ou mais": "green",
+                },
+                labels={"Mês": "Mês", "Percentual": "Percentual alcançado (%)", "Status": "Resultado"},
+                title=f"Evolução mensal do percentual da Loja — {ano_loja}",
+            )
+            grafico_loja.update_traces(textposition="outside")
+            grafico_loja.update_layout(yaxis_title="Percentual (%)", xaxis_title="Mês")
+            st.plotly_chart(grafico_loja, use_container_width=True)
+        else:
+            st.info(f"Não há percentuais cadastrados para a Loja em {ano_loja}.")
+    else:
+        st.info("Ainda não há percentuais cadastrados para a Loja. Use o formulário lateral, selecione 'Loja' e informe o percentual atingido.")
+
     # 1. Cards Média Anual - EXCLUSIVO LOJA
     st.write("#### Média Anual (Loja)")
     
