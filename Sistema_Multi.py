@@ -3,7 +3,8 @@ import sqlite3
 import hashlib
 import hmac
 import secrets
-from datetime import date, datetime
+from contextlib import contextmanager
+from datetime import date
 
 import pandas as pd
 import plotly.express as px
@@ -34,11 +35,15 @@ CORES_CONSULTORES = ["#60A5FA", "#A78BFA", "#2DD4BF", "#FB7185", "#FBBF24", "#38
 
 
 
+@contextmanager
 def conectar_banco():
     conexao = sqlite3.connect(DB_PATH, timeout=30)
     conexao.row_factory = sqlite3.Row
     conexao.execute("PRAGMA foreign_keys = ON")
-    return conexao
+    try:
+        yield conexao
+    finally:
+        conexao.close()
 
 
 def inicializar_banco():
