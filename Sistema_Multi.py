@@ -1,6 +1,9 @@
 import os
+import sqlite3
 import hashlib
-from datetime import date
+import hmac
+import secrets
+from datetime import date, datetime
 
 import pandas as pd
 import plotly.express as px
@@ -14,7 +17,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-NOME_ARQUIVO = "dadosmulti.csv"
+DB_PATH = os.environ.get("MULTI_ANALYTICS_DB", "multi_analytics.db")
 MESES = [
     "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
     "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro",
@@ -29,18 +32,190 @@ CORES_FAIXAS = {
 CORES_CONSULTORES = ["#60A5FA", "#A78BFA", "#2DD4BF", "#FB7185", "#FBBF24", "#38BDF8"]
 
 
-def carregar_dados():
-    colunas = ["Ano", "Mês", "Consultor", "Percentual"]
-    if not os.path.exists(NOME_ARQUIVO):
-        return pd.DataFrame(columns=colunas)
+
+
+def conectar_banco():
+    conexao = sqlite3.connect(DB_PATH, timeout=30)
+    conexao.row_factory = sqlite3.Row
+    conexao.execute("PRAGMA foreign_keys = ON")
+    return conexao
+
+
+def inicializar_banco():
+    with conectar_banco() as con:
+        con.executescript("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                password_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS consultants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                name TEXT NOT NULL COLLATE NOCASE,
+                photo TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, name),
+                UNIQUE(user_id, id),
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                consultant_id INTEGER NOT NULL,
+                year INTEGER NOT NULL,
+                month TEXT NOT NULL,
+                percentage REAL NOT NULL CHECK(percentage >= 0 AND percentage <= 400),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY(user_id, consultant_id)
+                    REFERENCES consultants(user_id, id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_results_user_period
+                ON results(user_id, year, month);
+            CREATE INDEX IF NOT EXISTS idx_results_user_consultant
+                ON results(user_id, consultant_id);
+        """)
+
+
+def criar_hash_senha(senha, salt=None):
+    salt = salt or secrets.token_hex(16)
+    derivada = hashlib.pbkdf2_hmac(
+        "sha256", senha.encode("utf-8"), bytes.fromhex(salt), 310_000
+    ).hex()
+    return salt + "$" + derivada
+
+
+def verificar_senha(senha, hash_salvo):
     try:
-        dados = pd.read_csv(NOME_ARQUIVO)
-        for coluna in colunas:
-            if coluna not in dados.columns:
-                dados[coluna] = pd.NA
-        return dados[colunas]
-    except Exception:
-        return pd.DataFrame(columns=colunas)
+        salt, esperado = hash_salvo.split("$", 1)
+        calculado = criar_hash_senha(senha, salt).split("$", 1)[1]
+        return hmac.compare_digest(calculado, esperado)
+    except (ValueError, TypeError):
+        return False
+
+
+def criar_usuario(email, senha):
+    email = email.strip().lower()
+    if not email or "@" not in email or "." not in email.rsplit("@", 1)[-1]:
+        return False, "Informe um e-mail válido."
+    if len(senha) < 10:
+        return False, "A senha deve ter pelo menos 10 caracteres."
+    try:
+        with conectar_banco() as con:
+            cursor = con.execute(
+                "INSERT INTO users(email, password_hash) VALUES (?, ?)",
+                (email, criar_hash_senha(senha)),
+            )
+            user_id = cursor.lastrowid
+            for nome in ("Loja", "Angela", "Camila", "Juliana"):
+                con.execute(
+                    "INSERT INTO consultants(user_id, name) VALUES (?, ?)",
+                    (user_id, nome),
+                )
+        return True, "Conta criada com sucesso."
+    except sqlite3.IntegrityError:
+        return False, "Já existe uma conta com esse e-mail."
+
+
+def autenticar_usuario(email, senha):
+    with conectar_banco() as con:
+        usuario = con.execute(
+            "SELECT id, email, password_hash FROM users WHERE email = ? COLLATE NOCASE",
+            (email.strip().lower(),),
+        ).fetchone()
+    if usuario and verificar_senha(senha, usuario["password_hash"]):
+        return {"id": int(usuario["id"]), "email": usuario["email"]}
+    return None
+
+
+def listar_consultores(user_id):
+    with conectar_banco() as con:
+        linhas = con.execute(
+            "SELECT id, name, photo FROM consultants WHERE user_id = ? ORDER BY name",
+            (int(user_id),),
+        ).fetchall()
+    return [dict(linha) for linha in linhas]
+
+
+def adicionar_consultor(user_id, nome, foto=None):
+    nome = nome.strip()
+    if not nome:
+        return False, "Informe o nome do consultor."
+    try:
+        with conectar_banco() as con:
+            con.execute(
+                "INSERT INTO consultants(user_id, name, photo) VALUES (?, ?, ?)",
+                (int(user_id), nome, foto),
+            )
+        return True, "Consultor " + nome + " cadastrado."
+    except sqlite3.IntegrityError:
+        return False, "Já existe um consultor com esse nome na sua conta."
+
+
+def excluir_consultor(user_id, consultant_id):
+    with conectar_banco() as con:
+        cursor = con.execute(
+            "DELETE FROM consultants WHERE id = ? AND user_id = ?",
+            (int(consultant_id), int(user_id)),
+        )
+        return cursor.rowcount == 1
+
+
+def salvar_resultado(user_id, consultant_id, ano, mes, percentual):
+    with conectar_banco() as con:
+        con.execute(
+            """INSERT INTO results(user_id, consultant_id, year, month, percentage)
+               SELECT ?, id, ?, ?, ? FROM consultants
+               WHERE id = ? AND user_id = ?""",
+            (int(user_id), int(ano), mes, float(percentual), int(consultant_id), int(user_id)),
+        )
+        if con.execute("SELECT changes()").fetchone()[0] != 1:
+            raise PermissionError("Consultor não pertence à conta autenticada.")
+
+
+def carregar_dados(user_id):
+    with conectar_banco() as con:
+        linhas = con.execute(
+            """SELECT r.id, r.user_id, r.consultant_id, r.year AS Ano,
+                      r.month AS 'Mês', c.name AS Consultor,
+                      r.percentage AS Percentual
+               FROM results r
+               INNER JOIN consultants c
+                 ON c.id = r.consultant_id AND c.user_id = r.user_id
+               WHERE r.user_id = ?
+               ORDER BY r.year, r.month, c.name""",
+            (int(user_id),),
+        ).fetchall()
+    return pd.DataFrame([dict(linha) for linha in linhas], columns=[
+        "id", "user_id", "consultant_id", "Ano", "Mês", "Consultor", "Percentual"
+    ])
+
+
+def atualizar_resultado(user_id, resultado_id, consultant_id, ano, mes, percentual):
+    with conectar_banco() as con:
+        cursor = con.execute(
+            """UPDATE results
+               SET consultant_id = ?, year = ?, month = ?, percentage = ?
+               WHERE id = ? AND user_id = ?
+                 AND EXISTS (
+                     SELECT 1 FROM consultants c
+                     WHERE c.id = ? AND c.user_id = ?
+                 )""",
+            (int(consultant_id), int(ano), mes, float(percentual),
+             int(resultado_id), int(user_id), int(consultant_id), int(user_id)),
+        )
+        return cursor.rowcount == 1
+
+
+def excluir_resultado(user_id, resultado_id):
+    with conectar_banco() as con:
+        cursor = con.execute(
+            "DELETE FROM results WHERE id = ? AND user_id = ?",
+            (int(resultado_id), int(user_id)),
+        )
+        return cursor.rowcount == 1
 
 
 def faixa_performance(valor):
@@ -56,7 +231,7 @@ def faixa_performance(valor):
 def preparar_dados(dados):
     dados = dados.copy()
     if dados.empty:
-        return pd.DataFrame(columns=["Ano", "Mês", "Consultor", "Percentual", "MêsNum", "Data", "Faixa"])
+        return pd.DataFrame(columns=["id", "user_id", "consultant_id", "Ano", "Mês", "Consultor", "Percentual", "MêsNum", "Data", "Faixa"])
     dados["Ano"] = pd.to_numeric(dados["Ano"], errors="coerce")
     dados["Percentual"] = pd.to_numeric(dados["Percentual"], errors="coerce")
     dados["Mês"] = dados["Mês"].astype(str).str.strip()
@@ -165,6 +340,63 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# Inicializa o banco local permanente antes de aceitar logins.
+inicializar_banco()
+
+if "usuario_autenticado" not in st.session_state:
+    st.session_state.usuario_autenticado = None
+
+if not st.session_state.usuario_autenticado:
+    st.markdown(
+        """
+        <div class="hero">
+          <div class="hero-kicker">Multi Analytics · Acesso seguro</div>
+          <h1 style="margin:7px 0 0 0;">Seu espaço de performance</h1>
+          <div class="hero-subtitle">Entre na sua conta ou crie um acesso para manter seus dados privados.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    col_login, col_registro = st.columns(2, gap="large")
+    with col_login:
+        st.subheader("Entrar")
+        with st.form("form_login"):
+            email_login = st.text_input("E-mail", key="email_login")
+            senha_login = st.text_input("Senha", type="password", key="senha_login")
+            enviar_login = st.form_submit_button("Entrar na minha conta", use_container_width=True)
+        if enviar_login:
+            usuario = autenticar_usuario(email_login, senha_login)
+            if usuario:
+                st.session_state.usuario_autenticado = usuario
+                st.rerun()
+            else:
+                st.error("E-mail ou senha incorretos.")
+    with col_registro:
+        st.subheader("Criar conta")
+        st.caption("Cada conta tem seus próprios consultores e resultados.")
+        with st.form("form_registro"):
+            email_novo = st.text_input("Seu e-mail", key="email_novo")
+            senha_nova = st.text_input("Crie uma senha (mínimo 10 caracteres)", type="password", key="senha_nova")
+            senha_confirmacao = st.text_input("Confirme a senha", type="password", key="senha_confirmacao")
+            enviar_registro = st.form_submit_button("Criar conta", use_container_width=True)
+        if enviar_registro:
+            if senha_nova != senha_confirmacao:
+                st.error("As senhas não coincidem.")
+            else:
+                ok, mensagem = criar_usuario(email_novo, senha_nova)
+                if ok:
+                    usuario = autenticar_usuario(email_novo, senha_nova)
+                    st.session_state.usuario_autenticado = usuario
+                    st.success(mensagem)
+                    st.rerun()
+                else:
+                    st.error(mensagem)
+    st.info("Seus dados ficam em um banco separado logicamente por identificador de usuário. Não compartilhe sua senha.")
+    st.stop()
+
+USUARIO_ID = int(st.session_state.usuario_autenticado["id"])
+USUARIO_EMAIL = st.session_state.usuario_autenticado["email"]
+
 st.markdown(
     """
     <div class="hero">
@@ -176,29 +408,58 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-if "dados" not in st.session_state:
-    st.session_state.dados = carregar_dados()
+st.session_state.dados = carregar_dados(USUARIO_ID)
+consultores_usuario = listar_consultores(USUARIO_ID)
 
-# Cadastro rápido preservado na barra lateral.
-st.sidebar.markdown("## ✚ Novo cadastro")
-with st.sidebar.form("form_cadastro", clear_on_submit=False):
-    ano_atual = date.today().year
-    ano_cadastro = st.number_input("Ano", min_value=2000, max_value=2100, value=max(2026, ano_atual), step=1)
-    mes_cadastro = st.selectbox("Mês", MESES, index=date.today().month - 1)
-    consultor_cadastro = st.selectbox("Consultor", ["Loja", "Angela", "Camila", "Juliana"])
-    percentual_cadastro = st.number_input("Percentual alcançado (%)", min_value=0.0, max_value=400.0, value=0.0, step=0.01, format="%.2f")
-    salvar_cadastro = st.form_submit_button("Salvar resultado", use_container_width=True)
-
-if salvar_cadastro:
-    novo = pd.DataFrame([{
-        "Ano": int(ano_cadastro), "Mês": mes_cadastro,
-        "Consultor": consultor_cadastro, "Percentual": float(percentual_cadastro),
-    }])
-    base = st.session_state.dados.copy()
-    st.session_state.dados = pd.concat([base, novo], ignore_index=True)
-    st.session_state.dados.to_csv(NOME_ARQUIVO, index=False)
-    st.sidebar.success("Resultado salvo.")
+st.sidebar.markdown(f"## 👤 {USUARIO_EMAIL}")
+if st.sidebar.button("Sair da conta", use_container_width=True):
+    st.session_state.usuario_autenticado = None
+    for chave in list(st.session_state.keys()):
+        if chave not in {"usuario_autenticado"}:
+            del st.session_state[chave]
     st.rerun()
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("## ✚ Novo lançamento")
+if not consultores_usuario:
+    st.sidebar.warning("Cadastre um consultor antes de lançar resultados.")
+else:
+    with st.sidebar.form("form_cadastro", clear_on_submit=True):
+        ano_atual = date.today().year
+        ano_cadastro = st.number_input("Ano", min_value=2000, max_value=2100, value=max(2026, ano_atual), step=1)
+        mes_cadastro = st.selectbox("Mês", MESES, index=date.today().month - 1)
+        consultor_por_nome = {c["name"]: c["id"] for c in consultores_usuario}
+        nome_consultor_cadastro = st.selectbox("Consultor", list(consultor_por_nome.keys()))
+        percentual_cadastro = st.number_input("Percentual alcançado (%)", min_value=0.0, max_value=400.0, value=0.0, step=0.01, format="%.2f")
+        salvar_cadastro = st.form_submit_button("Salvar resultado", use_container_width=True)
+
+    if salvar_cadastro:
+        salvar_resultado(
+            USUARIO_ID, consultor_por_nome[nome_consultor_cadastro],
+            int(ano_cadastro), mes_cadastro, float(percentual_cadastro),
+        )
+        st.sidebar.success("Resultado salvo na sua conta.")
+        st.rerun()
+
+with st.sidebar.expander("👥 Gerenciar meus consultores"):
+    with st.form("form_novo_consultor", clear_on_submit=True):
+        novo_nome_consultor = st.text_input("Nome do novo consultor")
+        adicionar_consultor_btn = st.form_submit_button("Adicionar consultor", use_container_width=True)
+    if adicionar_consultor_btn:
+        ok, mensagem = adicionar_consultor(USUARIO_ID, novo_nome_consultor)
+        (st.success if ok else st.error)(mensagem)
+        if ok:
+            st.rerun()
+
+    consultores_atualizados = listar_consultores(USUARIO_ID)
+    if consultores_atualizados:
+        mapa_consultores = {f'{c["name"]} (ID {c["id"]})': c["id"] for c in consultores_atualizados}
+        consultor_para_excluir = st.selectbox("Remover consultor", list(mapa_consultores), key="consultor_para_excluir")
+        st.caption("A remoção do consultor também apaga os lançamentos vinculados a ele.")
+        if st.button("Excluir consultor selecionado", key="excluir_consultor_btn", use_container_width=True):
+            if excluir_consultor(USUARIO_ID, mapa_consultores[consultor_para_excluir]):
+                st.success("Consultor e seus lançamentos foram removidos da sua conta.")
+                st.rerun()
 
 df = preparar_dados(st.session_state.dados)
 
@@ -444,19 +705,68 @@ else:
 
 # Tabela de dados e edição.
 st.markdown("---")
-with st.expander("🗂️ Consultar e editar registros", expanded=False):
-    st.caption("Edite as células ou remova linhas diretamente na tabela. As alterações são salvas no CSV.")
-    dados_editados = st.data_editor(
-        st.session_state.dados,
-        num_rows="dynamic",
-        use_container_width=True,
-        key="editor_tabela",
-    )
-    if not dados_editados.equals(st.session_state.dados):
-        st.session_state.dados = dados_editados
-        st.session_state.dados.to_csv(NOME_ARQUIVO, index=False)
-        st.success("Tabela atualizada.")
-        st.rerun()
+with st.expander("🗂️ Consultar, editar e excluir meus lançamentos", expanded=False):
+    st.caption("Esta tabela mostra somente os seus registros. Toda alteração é validada pelo identificador da conta autenticada.")
+    if not st.session_state.dados.empty:
+        st.dataframe(
+            st.session_state.dados[["id", "Ano", "Mês", "Consultor", "Percentual"]],
+            use_container_width=True,
+            hide_index=True,
+        )
+        registros = st.session_state.dados.to_dict("records")
+        rotulos = {
+            f'#{int(r["id"])} · {r["Consultor"]} · {r["Mês"]}/{int(r["Ano"])} · {float(r["Percentual"]):.2f}%': r
+            for r in registros
+        }
+        registro_escolhido_label = st.selectbox(
+            "Selecione um dos seus lançamentos", list(rotulos.keys()), key="registro_para_editar"
+        )
+        registro_escolhido = rotulos[registro_escolhido_label]
+        mapa_consultores_edicao = {c["name"]: c["id"] for c in listar_consultores(USUARIO_ID)}
+        nomes_edicao = list(mapa_consultores_edicao)
+        nome_atual = str(registro_escolhido["Consultor"])
+        indice_consultor = nomes_edicao.index(nome_atual) if nome_atual in nomes_edicao else 0
+        with st.form("form_editar_resultado"):
+            c1, c2 = st.columns(2)
+            with c1:
+                edit_ano = st.number_input(
+                    "Ano do lançamento", min_value=2000, max_value=2100,
+                    value=int(registro_escolhido["Ano"]), step=1
+                )
+                edit_mes = st.selectbox(
+                    "Mês do lançamento", MESES,
+                    index=MESES.index(str(registro_escolhido["Mês"]))
+                )
+            with c2:
+                edit_consultor_nome = st.selectbox(
+                    "Consultor do lançamento", nomes_edicao, index=indice_consultor
+                )
+                edit_percentual = st.number_input(
+                    "Percentual (%)", min_value=0.0, max_value=400.0,
+                    value=float(registro_escolhido["Percentual"]), step=0.01, format="%.2f"
+                )
+            salvar_edicao = st.form_submit_button("Salvar alterações")
+        if salvar_edicao:
+            ok = atualizar_resultado(
+                USUARIO_ID, int(registro_escolhido["id"]),
+                mapa_consultores_edicao[edit_consultor_nome],
+                int(edit_ano), edit_mes, float(edit_percentual),
+            )
+            if ok:
+                st.success("Lançamento atualizado.")
+                st.rerun()
+            else:
+                st.error("Não foi possível atualizar esse lançamento.")
+        st.warning("Excluir é permanente e afeta somente o lançamento selecionado.")
+        confirmar_exclusao = st.checkbox("Confirmo que desejo excluir este lançamento", key="confirmar_exclusao_lancamento")
+        if st.button("Excluir lançamento selecionado", key="excluir_lancamento_btn", disabled=not confirmar_exclusao):
+            if excluir_resultado(USUARIO_ID, int(registro_escolhido["id"])):
+                st.success("Lançamento excluído da sua conta.")
+                st.rerun()
+            else:
+                st.error("Não foi possível excluir esse lançamento.")
+    else:
+        sem_dados("Você ainda não possui lançamentos. Use o formulário lateral para cadastrar o primeiro resultado.")
 
 st.markdown("---")
 st.caption("Multi Analytics · Os resultados são calculados a partir dos registros cadastrados. Exporte os gráficos em PNG ou PDF pelos controles de cada visualização.")
