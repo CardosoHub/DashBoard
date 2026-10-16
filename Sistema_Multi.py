@@ -64,6 +64,68 @@ if not st.session_state.dados.empty:
     df_temp["Ano"] = pd.to_numeric(df_temp["Ano"], errors="coerce").fillna(0).astype(int)
     df_temp["Percentual"] = pd.to_numeric(df_temp["Percentual"], errors="coerce").fillna(0)
 
+    # =========================================================================
+    # RANKING VISUAL: MEDALHAS DE OURO, PRATA E BRONZE
+    # =========================================================================
+    st.write("---")
+    st.write("### 🏆 Ranking de Consultores")
+    st.caption("O ranking considera a média do percentual de cada consultor no período selecionado. A Loja não participa da classificação.")
+
+    col_rank_ano, col_rank_mes = st.columns(2)
+    with col_rank_ano:
+        anos_ranking = sorted(df_temp["Ano"].dropna().unique().tolist(), reverse=True)
+        ano_ranking = st.selectbox("Ano do ranking", anos_ranking, key="ano_ranking")
+    with col_rank_mes:
+        meses_do_ano = [m for m in ORDEM_MESES if m in df_temp.loc[df_temp["Ano"] == ano_ranking, "Mês"].astype(str).str.strip().unique()]
+        mes_ranking = st.selectbox("Mês do ranking", meses_do_ano or ORDEM_MESES, key="mes_ranking")
+
+    df_ranking = df_temp[
+        (df_temp["Ano"] == int(ano_ranking))
+        & (df_temp["Mês"].astype(str).str.strip() == mes_ranking)
+        & (df_temp["Consultor"].astype(str).str.strip().str.casefold() != "loja")
+    ].copy()
+
+    if not df_ranking.empty:
+        ranking = (
+            df_ranking.groupby("Consultor", as_index=False)["Percentual"]
+            .mean()
+            .sort_values("Percentual", ascending=False)
+            .reset_index(drop=True)
+        )
+        ranking["Posição"] = ranking.index + 1
+        medalhas = {1: ("🥇", "Ouro"), 2: ("🥈", "Prata"), 3: ("🥉", "Bronze")}
+        # Coloque as fotos reais em fotos/Angela.jpg, fotos/Camila.jpg e fotos/Juliana.jpg.
+        # Enquanto a foto não existir, é exibido um avatar com o nome do consultor.
+        fotos_consultores = {
+            "Angela": "fotos/Angela.jpg",
+            "Camila": "fotos/Camila.jpg",
+            "Juliana": "fotos/Juliana.jpg",
+        }
+
+        primeiros = ranking.head(3)
+        colunas_ranking = st.columns(len(primeiros))
+        for coluna, (_, consultor) in zip(colunas_ranking, primeiros.iterrows()):
+            posicao = int(consultor["Posição"])
+            medalha, nome_medalha = medalhas[posicao]
+            nome = str(consultor["Consultor"])
+            caminho_foto = fotos_consultores.get(nome)
+            with coluna:
+                st.markdown(f"### {medalha} {nome_medalha} lugar")
+                if caminho_foto and os.path.exists(caminho_foto):
+                    st.image(caminho_foto, width=150)
+                else:
+                    nome_avatar = nome.replace(" ", "+")
+                    st.image(
+                        f"https://ui-avatars.com/api/?name={nome_avatar}&size=256&background=E8EDF3&color=243447&bold=true",
+                        width=150,
+                    )
+                st.markdown(f"**{nome}**")
+                st.metric("Percentual alcançado", f"{float(consultor['Percentual']):.2f}%")
+                st.caption(f"Posição no ranking: {posicao}º")
+    else:
+        st.info(f"Não há dados de consultores para {mes_ranking} de {ano_ranking}.")
+
+
     # 1. Cards Média Anual - EXCLUSIVO LOJA
     st.write("#### Média Anual (Loja)")
     
