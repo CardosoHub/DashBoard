@@ -42,6 +42,10 @@ def conectar_banco():
     conexao.execute("PRAGMA foreign_keys = ON")
     try:
         yield conexao
+        conexao.commit()
+    except Exception:
+        conexao.rollback()
+        raise
     finally:
         conexao.close()
 
